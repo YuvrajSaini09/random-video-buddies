@@ -387,6 +387,7 @@ class ChatService {
   }
 
   // Subscribe to new messages
+  // Fix for infinite type instantiation - Use explicit callback type
   subscribeToMessages(callback: (message: ChatMessage) => void): () => void {
     if (!this.currentRoom) return () => {};
     
