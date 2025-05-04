@@ -1,4 +1,3 @@
-
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/components/ui/sonner";
 import { v4 as uuidv4 } from "uuid";
@@ -391,6 +390,17 @@ class ChatService {
   subscribeToMessages(callback: (message: ChatMessage) => void): () => void {
     if (!this.currentRoom) return () => {};
     
+    // Define RealtimePostgresChangesPayload interface for proper typing
+    interface RealtimePostgresChangesPayload {
+      new: {
+        id: string;
+        user_id: string;
+        message: string;
+        created_at: string;
+        [key: string]: any;
+      };
+    }
+    
     const channel = supabase
       .channel(`messages-${this.currentRoom}`)
       .on('postgres_changes', {
@@ -398,7 +408,7 @@ class ChatService {
         schema: 'public',
         table: 'chat_messages',
         filter: `room_id=eq.${this.currentRoom} AND is_signal=eq.false`
-      }, (payload) => {
+      }, (payload: RealtimePostgresChangesPayload) => {
         const msg = payload.new;
         callback({
           id: msg.id,
