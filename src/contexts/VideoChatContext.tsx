@@ -1,6 +1,8 @@
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { toast } from '@/components/ui/sonner';
+import chatService, { ChatMessage } from '@/services/ChatService';
+import { v4 as uuidv4 } from 'uuid';
 
 type ChatMode = 'video' | 'text';
 
@@ -34,11 +36,6 @@ interface Message {
 
 const VideoChatContext = createContext<VideoChatContextType | undefined>(undefined);
 
-// Mock functions for demonstration
-const generateRandomNumber = (min: number, max: number) => {
-  return Math.floor(Math.random() * (max - min + 1) + min);
-};
-
 export const VideoChatProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -51,45 +48,97 @@ export const VideoChatProvider: React.FC<{ children: ReactNode }> = ({ children 
   const [videoEnabled, setVideoEnabled] = useState(true);
   const [audioEnabled, setAudioEnabled] = useState(true);
   
-  // Simulate random online users
+  // Initialize service and fetch online user count
   useEffect(() => {
-    const interval = setInterval(() => {
-      setOnlineUsers(generateRandomNumber(50, 200));
-    }, 10000);
+    const initializeService = async () => {
+      try {
+        await chatService.initUser(chatMode);
+        updateOnlineUserCount();
+        
+        // Set up interval to update online user count
+        const interval = setInterval(updateOnlineUserCount, 10000);
+        
+        return () => {
+          clearInterval(interval);
+          chatService.cleanup();
+        };
+      } catch (error) {
+        console.error("Error initializing chat service:", error);
+      }
+    };
     
-    setOnlineUsers(generateRandomNumber(50, 200));
-    
-    return () => clearInterval(interval);
+    initializeService();
   }, []);
 
+  // Update online user count
+  const updateOnlineUserCount = async () => {
+    const count = await chatService.getOnlineUserCount();
+    setOnlineUsers(count);
+  };
+
+  // Process incoming message
+  const handleNewMessage = (message: ChatMessage) => {
+    const newMessage: Message = {
+      id: message.id,
+      text: message.message,
+      isLocal: message.userId === chatService.getUserId(),
+      timestamp: message.createdAt
+    };
+    
+    setMessages(prev => [...prev, newMessage]);
+  };
+
+  // Start chat session
   const startChat = async () => {
     try {
       setIsConnecting(true);
       
-      // Request permissions and get local stream
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
+      // Request media permissions
+      const stream = await chatService.setupLocalStream(chatMode === 'video', true);
+      if (!stream) {
+        setIsConnecting(false);
+        return;
+      }
       
       setLocalStream(stream);
+      setVideoEnabled(chatMode === 'video');
+      setAudioEnabled(true);
       
-      // Simulate finding a partner
+      // Find a partner
       setIsFindingPartner(true);
+      const partnerFound = await chatService.findPartner(chatMode);
       
-      // Simulate connection delay
-      setTimeout(() => {
-        // For demo purposes, create a mock remote stream
-        const mockRemoteStream = new MediaStream();
-        setRemoteStream(mockRemoteStream);
-        
+      if (partnerFound) {
         setIsConnected(true);
         setIsConnecting(false);
         setIsFindingPartner(false);
         
+        // Subscribe to new messages
+        const unsubscribe = chatService.subscribeToMessages(handleNewMessage);
+        
+        // Load existing messages
+        const existingMessages = await chatService.getMessages();
+        const formattedMessages = existingMessages.map(msg => ({
+          id: msg.id,
+          text: msg.message,
+          isLocal: msg.userId === chatService.getUserId(),
+          timestamp: msg.createdAt
+        }));
+        
+        setMessages(formattedMessages);
+        
+        // Get remote stream if available
+        const remoteStr = chatService.getRemoteStream();
+        if (remoteStr) {
+          setRemoteStream(remoteStr);
+        }
+        
         toast.success("Connected to a stranger!");
-      }, 2000);
-      
+      } else {
+        setIsConnecting(false);
+        setIsFindingPartner(false);
+        toast.error("No one is available right now. Try again later.");
+      }
     } catch (error) {
       console.error('Failed to start chat:', error);
       setIsConnecting(false);
@@ -97,20 +146,35 @@ export const VideoChatProvider: React.FC<{ children: ReactNode }> = ({ children 
     }
   };
 
+  // Find a new partner
   const findNewPartner = async () => {
     setIsConnected(false);
     setIsFindingPartner(true);
     setMessages([]);
     
-    // Simulate finding a new partner
-    setTimeout(() => {
+    // End current chat
+    await chatService.endChat();
+    
+    // Find a new partner
+    const partnerFound = await chatService.findPartner(chatMode);
+    
+    if (partnerFound) {
       setIsConnected(true);
       setIsFindingPartner(false);
       toast.success("Connected to a new stranger!");
-    }, 1500);
+      
+      // Subscribe to new messages
+      chatService.subscribeToMessages(handleNewMessage);
+    } else {
+      setIsFindingPartner(false);
+      toast.error("No one is available right now. Try again later.");
+    }
   };
 
+  // End the chat
   const endChat = () => {
+    chatService.endChat();
+    
     if (localStream) {
       localStream.getTracks().forEach(track => track.stop());
     }
@@ -123,71 +187,41 @@ export const VideoChatProvider: React.FC<{ children: ReactNode }> = ({ children 
     setMessages([]);
   };
 
+  // Toggle video
   const toggleVideo = () => {
-    if (localStream) {
-      const videoTrack = localStream.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setVideoEnabled(videoTrack.enabled);
-      }
-    }
+    const newState = !videoEnabled;
+    chatService.toggleVideo(newState);
+    setVideoEnabled(newState);
   };
 
+  // Toggle audio
   const toggleAudio = () => {
-    if (localStream) {
-      const audioTrack = localStream.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setAudioEnabled(audioTrack.enabled);
-      }
-    }
+    const newState = !audioEnabled;
+    chatService.toggleAudio(newState);
+    setAudioEnabled(newState);
   };
 
+  // Send a message
   const sendMessage = (text: string) => {
-    if (!text.trim()) return;
+    if (!text.trim() || !isConnected) return;
+    
+    chatService.sendMessage(text);
     
     const newMessage: Message = {
-      id: Date.now().toString(),
+      id: uuidv4(),
       text,
       isLocal: true,
       timestamp: new Date()
     };
     
     setMessages(prev => [...prev, newMessage]);
-    
-    // Simulate receiving a response
-    setTimeout(() => {
-      const responses = [
-        "Hey there!",
-        "Nice to meet you!",
-        "Where are you from?",
-        "How's your day going?",
-        "That's interesting!",
-        "I'm enjoying this chat.",
-        "Do you have any hobbies?",
-        "What brings you here today?",
-        "Cool!",
-        "I see what you mean."
-      ];
-      
-      const remoteMessage: Message = {
-        id: Date.now().toString(),
-        text: responses[Math.floor(Math.random() * responses.length)],
-        isLocal: false,
-        timestamp: new Date()
-      };
-      
-      setMessages(prev => [...prev, remoteMessage]);
-    }, generateRandomNumber(1000, 3000));
   };
 
-  useEffect(() => {
-    return () => {
-      if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, [localStream]);
+  // Update chat mode
+  const handleSetChatMode = (mode: ChatMode) => {
+    setChatMode(mode);
+    chatService.endChat();
+  };
 
   return (
     <VideoChatContext.Provider
@@ -207,7 +241,7 @@ export const VideoChatProvider: React.FC<{ children: ReactNode }> = ({ children 
         endChat,
         toggleVideo,
         toggleAudio,
-        setChatMode,
+        setChatMode: handleSetChatMode,
         sendMessage
       }}
     >
