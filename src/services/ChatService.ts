@@ -1,3 +1,4 @@
+
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/components/ui/sonner";
 import { v4 as uuidv4 } from "uuid";
@@ -117,7 +118,7 @@ class ChatService {
         .update({
           status: 'searching',
           chat_mode: chatMode,
-          last_active: new Date()
+          last_active: new Date().toISOString() // Fixed: Convert Date to string
         })
         .eq('user_id', this.userId);
       
